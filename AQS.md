@@ -208,4 +208,92 @@
                 doAcquireShared(arg);
         }
         ```
+    * doAcquireShared()
+        ```Java
+        private void doAcquireShared(int arg) {
+            final Node node = addWaiter(Node.SHARED); // 创建一个共享结点并添加到队尾
+            boolean failed = true; // 标记资源是否获取失败
+            try {
+                boolean interrupted = false; // 标记等待过程是否被中断
+                for (;;) {
+                    final Node p = node.predecessor();
+                    if (p == head) { // 头结点持有同步状态，只有前驱是头结点，才有机会尝试获取同步状态
+                        int r = tryAcquireShared(arg); // 尝试获取资源
+                        if (r >= 0) {
+                            setHeadAndPropagate(node, r); // 获取成功就将当前结点设置为头结点，若还有可用资源，传播下去，也就是继续唤醒后继结点
+                            p.next = null; // help GC
+                            if (interrupted)
+                                selfInterrupt();
+                            failed = false;
+                            return;
+                        }
+                    }
+                    // 没有轮到自己去获取资源，判断当前是否可以进入waiting状态
+                    if (shouldParkAfterFailedAcquire(p, node) &&
+                        parkAndCheckInterrupt())
+                        interrupted = true;
+                }
+            } finally {
+                if (failed)
+                    cancelAcquire(node);
+            }
+        }
+        ```
+    * setHeadAndPropagate()
+        ```Java
+        private void setHeadAndPropagate(Node node, int propagate) {
+            Node h = head; // 记录原头部结点
+            setHead(node); // 把自己设置成新的头部结点
+            // 如果有剩余资源，尝试去唤醒后继结点
+            if (propagate > 0 || h == null || h.waitStatus < 0 ||
+                (h = head) == null || h.waitStatus < 0) {
+                Node s = node.next;
+                if (s == null || s.isShared())
+                    doReleaseShared();
+            }
+        }
+        ```
+    * 小结
+        * 跟独占式类似，先调用tryAcquireShared()尝试获取资源，成功则直接返回
+        * 失败则通过doAcquireShared()进入等待队列park()，直到被unpark()/interrupt()并成功获取到资源才返回。整个等待过程也是忽略中断的。
 5. 共享式releaseShared()
+    * releaseShared()
+        ```Java
+        public final boolean releaseShared(int arg) {
+            if (tryReleaseShared(arg)) { // 尝试释放资源
+                doReleaseShared(); // 唤醒后继结点
+                return true;
+            }
+            return false;
+        }
+        ```
+        * 独占模式下的tryRelease()在完全释放掉资源（state=0）后，才会返回true去唤醒其他线程，这主要是基于独占下可重入的考量；而共享模式下的releaseShared()则没有这种要求，共享模式实质就是控制一定量的线程并发执行，那么拥有资源的线程在释放掉部分资源时就可以唤醒后继等待结点。例如，资源总量是13，A（5）和B（7）分别获取到资源并发运行，C（4）来时只剩1个资源就需要等待。A在运行过程中释放掉2个资源量，然后tryReleaseShared(2)返回true唤醒C，C一看只有3个仍不够继续等待；随后B又释放2个，tryReleaseShared(2)返回true唤醒C，C一看有5个够自己用了，然后C就可以跟A和B一起运行
+        * 而ReentrantReadWriteLock读锁的tryReleaseShared()只有在完全释放掉资源（state=0）才返回true，所以自定义同步器可以根据需要决定tryReleaseShared()的返回值。
+    * doReleaseShared()
+        ```Java
+        private void doReleaseShared() {
+            for (;;) {
+                Node h = head; // 记录原头部结点
+                if (h != null && h != tail) { // 判断队列是否至少有两个node，如果队列从来没有初始化过（head为null），或者head就是tail，那么中间逻辑直接不走，直接判断head是否变化了。
+                    int ws = h.waitStatus;
+                    if (ws == Node.SIGNAL) { // 如果状态为SIGNAL，说明h的后继是需要被通知的
+                        if (!compareAndSetWaitStatus(h, Node.SIGNAL, 0))
+                            continue;            // loop to recheck cases
+                        unparkSuccessor(h); // 唤醒后继结点
+                    }
+                    // 如果状态为0，说明h的后继所代表的线程已经被唤醒或即将被唤醒，并且这个中间状态即将消失，要么由于acquire thread获取锁失败再次设置head为SIGNAL并再次阻塞，要么由于acquire thread获取锁成功而将自己（head后继）设置为新head并且只要head后继不是队尾，那么新head肯定为SIGNAL。所以设置这种中间状态的head的status为PROPAGATE，让其status又变成负数，这样可能被被唤醒线程检测到。
+                    else if (ws == 0 &&
+                             !compareAndSetWaitStatus(h, 0, Node.PROPAGATE))
+                        continue;                // loop on failed CAS
+                }
+                if (h == head) // head变化一定是因为：acquire thread被唤醒，之后它成功获取锁，然后setHead设置了新head
+                    // 只要在某个循环的过程中有线程刚获取了锁且设置了新head，就会再次循环。是为了再次执行unparkSuccessor(h)，即唤醒队列中第一个等待的线程
+                    break;
+            }
+        }
+        ```
+    * 参考
+        * https://blog.csdn.net/anlian523/article/details/106319538/
+#### 3. 参考资料
+    * https://www.cnblogs.com/chengxiao/archive/2017/07/24/7141160.html#a3-1
+    * https://ifeve.com/java并发之aqs详解/
